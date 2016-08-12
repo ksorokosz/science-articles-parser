@@ -11,6 +11,7 @@
 # 
 # Dependencies:
 # - pdfminer
+# - datefinder
 
 import sys, time, codecs
 import io, os, re
@@ -19,6 +20,7 @@ default_encoding = 'cp1250' # PDF file meta data default encoding (maybe platfor
 sys.stdout = codecs.getwriter('utf8')(sys.stdout)
 sys.stderr = codecs.getwriter('utf8')(sys.stderr)
 
+import datefinder
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfparser import PDFParser
 from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
@@ -27,6 +29,22 @@ from pdfminer.layout import LAParams
 from pdfminer.pdfpage import PDFPage
 from pdfminer.converter import PDFPageAggregator
 from pdfminer.layout import LAParams, LTTextBox, LTTextLine, LTFigure
+
+# Extract date from pdf file - heuristic
+def get_date(pdfdata):
+
+	text = parse_layout(pdfdata)
+	pdflines = iter(text.splitlines())
+	date = []
+	for line in pdflines:
+		try:
+			extracted = list(datefinder.find_dates(line))
+		except:
+			continue
+		if extracted:
+			date.extend(extracted)
+			
+	return date
 
 # Extract abstract from pdf file - heuristic
 def get_abstract(pdfdata):
@@ -40,14 +58,18 @@ def get_abstract(pdfdata):
 			parsing = True
 		elif not line.strip() and abstract: # Until empty line and abstract is readed
 			parsing = False
+			break
 		if parsing:
 			index = line.lower().find("abstract")
 			if index != -1:
-				line = line[index+len("abstract")+1:] # Remove abstract
+				line = line[index+len("abstract"):] # Remove abstract word
 			abstract = ''.join([abstract, line])
 			
+	# Remove non-ascii
 	abstract = ''.join(c if ord(c) < 129 and ord(c) > 0 else '' for c in abstract)
-	abstract = ' '.join(abstract.split())
+	
+	# Fix whitespaces
+	abstract = ' '.join(abstract.split()).replace("\n",' ').strip()
 	return abstract
 		
 
@@ -61,7 +83,6 @@ def parse_layout(pdfdata):
 			
 # Convert PDF
 # http://stackoverflow.com/questions/5725278/how-do-i-use-pdfminer-as-a-library
-# https://github.com/timClicks/slate/issues/5
 def convert_article(path):
 
 	rsrcmgr = PDFResourceManager()
@@ -74,27 +95,37 @@ def convert_article(path):
 	parser.set_document(doc)
 
 	interpreter = PDFPageInterpreter(rsrcmgr, device)
-	maxpages = 1
+	maxpages = 0
 	caching = True
 	pagenos=set()
 	
-	metadata = {}
+	metadata = { 'Title': '' , 'Author': '', 'Abstract': '' }
 	
 	# Get title and author from pdf metadata
 	for meta in doc.info:
-		title = meta['Title'].decode(default_encoding)
-		author = meta['Author'].decode(default_encoding)
-		title = ''.join(c if ord(c) < 129 and ord(c) > 0 else '' for c in title) # Only ASCII characters
-		author = ''.join(c if ord(c) < 129 and ord(c) > 0 else '' for c in author) # Only ASCII characters
-		metadata = { "Title": title, "Author": author, "Abstract": '' }
-	
-	# Get abstract from file
-	for page in PDFPage.get_pages(fp, pagenos, maxpages=maxpages, 
-				  caching=caching,check_extractable=True):
+		try:
+			title = ''.join(c if ord(c) < 129 and ord(c) > 0 else '' for c in meta['Title']) # Only ASCII characters
+			author = ''.join(c if ord(c) < 129 and ord(c) > 0 else '' for c in meta['Author']) # Only ASCII characters
+			title = title.decode(default_encoding)
+			author = author.decode(default_encoding)
+			metadata = { "Title": title, "Author": author, "Abstract": '', "Date": '' }
+		except:
+			continue
+			
+	# Parse pdf file
+	date = []
+	for index, page in enumerate(PDFPage.get_pages(fp, pagenos, maxpages=maxpages, 
+				  caching=caching,check_extractable=True)):
 		interpreter.process_page(page)
 		pdfdata = device.get_result()
-		abstract = get_abstract(pdfdata).replace("\n",' ').strip()
-		metadata["Abstract"] = abstract
+		date.extend(get_date(pdfdata))
+
+		# Abstract should be published on first page
+		if index == 0:
+			abstract = get_abstract(pdfdata)
+			metadata["Abstract"] = abstract	
+
+	metadata["Date"] = date[0].year # First detected date
 		
 	fp.close()
 	device.close()
@@ -110,7 +141,9 @@ def parse_articles():
 		(name, pdffile) = line.split("\t"); # name for validation
 		
 		retrieved_info = convert_article( pdffile )
-		print "%s\t%s\t%s" % ( retrieved_info['Title'], retrieved_info['Author'], retrieved_info['Abstract'])
+		print "%s\t%s\t%s\t%s\t%s" % \
+		( pdffile, retrieved_info['Title'], retrieved_info['Author'], 
+		  retrieved_info['Date'], retrieved_info['Abstract'])
 
 if __name__ == "__main__":
 	parse_articles()
